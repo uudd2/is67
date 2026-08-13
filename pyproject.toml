@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "vlanext"
 version = "0.1.0"
 description = "VLANeXt: Recipes for Building Strong VLA Models"
-readme = "README.md"
 license = "LicenseRef-S-Lab-1.0"
 requires-python = ">=3.10"
 dependencies = [
