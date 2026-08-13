@@ -262,6 +262,7 @@ def get_vla(cfg):
             vita_layer_local_queries_per_layer=model_config.get('vita_layer_local_queries_per_layer', 2),
             vita_layer_local_queries_per_layer_list=model_config.get('vita_layer_local_queries_per_layer_list', None),
             vita_layer_local_token_source_modes=model_config.get('vita_layer_local_token_source_modes', None),
+            hier_mq_separate_views=model_config.get('hier_mq_separate_views', False),
             vita_cross_layer_queries=model_config.get('vita_cross_layer_queries', 18),
             vita_global_queries=model_config.get('vita_global_queries', 8),
             vita_adaptive_local_mq=model_config.get('vita_adaptive_local_mq', False),

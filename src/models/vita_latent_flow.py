@@ -1310,6 +1310,7 @@ class ObservationLatentEncoder(nn.Module):
         layer_local_queries_per_layer=2,
         layer_local_queries_per_layer_list=None,
         layer_local_token_source_modes=None,
+        hier_mq_separate_views=False,
         cross_layer_queries=18,
         global_queries=8,
         adaptive_local_mq=False,
@@ -1393,6 +1394,7 @@ class ObservationLatentEncoder(nn.Module):
             if layer_local_token_source_modes is not None
             else None
         )
+        self.hier_mq_separate_views = bool(hier_mq_separate_views)
         self.cross_layer_queries = int(cross_layer_queries)
         self.global_queries = int(global_queries)
         self.adaptive_local_mq = bool(adaptive_local_mq)
@@ -1505,6 +1507,8 @@ class ObservationLatentEncoder(nn.Module):
             raise ValueError("Hierarchical query pooling requires hidden_pooling='attention'.")
         if self.hierarchical_query_pooling and not self.blockwise_hidden_layer_indices:
             raise ValueError("Hierarchical query pooling requires blockwise_hidden_layer_indices.")
+        if self.hier_mq_separate_views and not self.hierarchical_query_pooling:
+            raise ValueError("Separate-view HierMQ requires hierarchical_query_pooling=True.")
         if self.hierarchical_global_residual_block and not self.hierarchical_query_pooling:
             raise ValueError(
                 "The global residual block requires hierarchical_query_pooling=True."
@@ -1585,6 +1589,20 @@ class ObservationLatentEncoder(nn.Module):
         )
         if self.layer_local_token_source_modes is None:
             self.layer_local_token_source_modes = ["all"] * num_hier_layers
+        if self.hier_mq_separate_views:
+            non_text_counts = [
+                count
+                for count, mode in zip(
+                    self.layer_local_query_counts,
+                    self.layer_local_token_source_modes,
+                )
+                if mode != "text"
+            ]
+            if any(count % 2 for count in non_text_counts):
+                raise ValueError(
+                    "Separate-view HierMQ requires an even query count for every "
+                    "non-text local source."
+                )
         if self.adaptive_local_mq:
             if not self.hierarchical_query_pooling:
                 raise ValueError(
@@ -2390,7 +2408,96 @@ class ObservationLatentEncoder(nn.Module):
             key_padding_mask[all_masked] = False
         return key_padding_mask
 
-    def _hierarchical_pool_project_tokens(self, hidden_states, hidden_token_type_ids=None):
+    @staticmethod
+    def _make_shared_view_queries(queries):
+        if queries.shape[-2] % 2:
+            raise ValueError("Separate-view query count must be even.")
+        per_view = queries.shape[-2] // 2
+        return 0.5 * (queries[..., :per_view, :] + queries[..., per_view:, :])
+
+    @staticmethod
+    def _view_visual_masks(
+        hidden_token_type_ids,
+        image_grid_thw,
+        spatial_merge_size,
+    ):
+        if hidden_token_type_ids is None:
+            raise ValueError("Separate-view HierMQ requires hidden token type IDs.")
+        if image_grid_thw is None:
+            raise ValueError("Separate-view HierMQ requires image_grid_thw metadata.")
+        batch_size, sequence_length = hidden_token_type_ids.shape
+        grids = image_grid_thw
+        if grids.ndim == 2:
+            if grids.shape != (batch_size * 2, 3):
+                raise ValueError(
+                    "Separate-view HierMQ requires exactly two image grids per sample."
+                )
+            grids = grids.reshape(batch_size, 2, 3)
+        if grids.ndim != 3 or grids.shape != (batch_size, 2, 3):
+            raise ValueError("image_grid_thw must have shape [B*2,3] or [B,2,3].")
+
+        merge = int(spatial_merge_size)
+        if merge < 1:
+            raise ValueError("spatial_merge_size must be positive.")
+        view_masks = [
+            torch.zeros(
+                batch_size,
+                sequence_length,
+                device=hidden_token_type_ids.device,
+                dtype=torch.bool,
+            )
+            for _ in range(2)
+        ]
+        for batch_index in range(batch_size):
+            visual_positions = torch.where(
+                (hidden_token_type_ids[batch_index] == 1)
+                | (hidden_token_type_ids[batch_index] == 2)
+            )[0]
+            counts = []
+            for view_index in range(2):
+                temporal, height, width = [
+                    int(value)
+                    for value in grids[batch_index, view_index].detach().cpu().tolist()
+                ]
+                if height % merge or width % merge:
+                    raise ValueError(
+                        "Image grid dimensions must be divisible by spatial_merge_size."
+                    )
+                counts.append(temporal * (height // merge) * (width // merge))
+            if visual_positions.numel() != sum(counts):
+                raise ValueError(
+                    "Visual token count does not match the two image grids: "
+                    f"{visual_positions.numel()} != {sum(counts)}."
+                )
+            offset = 0
+            for view_index, count in enumerate(counts):
+                selected = visual_positions[offset : offset + count]
+                view_masks[view_index][batch_index, selected] = True
+                offset += count
+        return tuple(view_masks)
+
+    @staticmethod
+    def _split_view_context_masks(original_key_padding_mask, view_visual_masks):
+        all_visual_mask = view_visual_masks[0] | view_visual_masks[1]
+        if original_key_padding_mask is None:
+            original_allowed = torch.ones_like(all_visual_mask)
+        else:
+            original_allowed = ~original_key_padding_mask
+        return tuple(
+            ~(
+                original_allowed
+                & (~all_visual_mask | view_visual_mask)
+            )
+            for view_visual_mask in view_visual_masks
+        )
+
+    def _hierarchical_pool_project_tokens(
+        self,
+        hidden_states,
+        hidden_token_type_ids=None,
+        image_grid_thw=None,
+        spatial_merge_size=1,
+    ):
         if not isinstance(hidden_states, (tuple, list)):
             raise ValueError("Hierarchical query pooling requires all VLM hidden states.")
         local_tokens = []
@@ -2411,6 +2518,13 @@ class ObservationLatentEncoder(nn.Module):
         self.last_dynamic_topk_random_selected_mask = None
         self.last_dynamic_topk_metrics = {}
         batch_size = hidden_states[0].shape[0]
+        view_visual_masks = None
+        if self.hier_mq_separate_views:
+            view_visual_masks = self._view_visual_masks(
+                hidden_token_type_ids,
+                image_grid_thw,
+                spatial_merge_size,
+            )
         query_offset = 0
         adaptive_query_offsets = {
             layer_position: reserve_index * self.adaptive_mq_num_slots
@@ -2427,7 +2541,46 @@ class ObservationLatentEncoder(nn.Module):
                 query_offset : query_offset + query_count
             ].unsqueeze(0).expand(batch_size, -1, -1)
             query_offset += query_count
-            if self.mq_competitive_local_attention and query_count > 1:
+            separate_source_views = (
+                self.hier_mq_separate_views and source_mode != "text"
+            )
+            if separate_source_views:
+                shared_query = self._make_shared_view_queries(local_query)
+                view_context_masks = self._split_view_context_masks(
+                    key_padding_mask,
+                    view_visual_masks,
+                )
+                pooled_views = []
+                attention_views = []
+                balance_views = []
+                for view_context_mask in view_context_masks:
+                    if self.mq_competitive_local_attention and shared_query.shape[1] > 1:
+                        view_pooled, view_attn, view_balance = self._multihead_competitive_pool(
+                            shared_query,
+                            layer_tokens,
+                            key_padding_mask=view_context_mask,
+                        )
+                        balance_views.append(view_balance)
+                    else:
+                        view_pooled, view_attn = self.pool_attention(
+                            query=shared_query,
+                            key=layer_tokens,
+                            value=layer_tokens,
+                            key_padding_mask=view_context_mask,
+                            need_weights=self.use_mq_overlap_loss,
+                            average_attn_weights=True,
+                        )
+                    pooled_views.append(view_pooled)
+                    attention_views.append(view_attn)
+                local_pooled = torch.cat(pooled_views, dim=1)
+                local_attn = (
+                    torch.cat(attention_views, dim=1)
+                    if attention_views[0] is not None
+                    else None
+                )
+                if balance_views:
+                    local_balance_losses.append(torch.stack(balance_views).mean())
+            elif self.mq_competitive_local_attention and query_count > 1:
                 local_pooled, local_attn, local_balance = self._multihead_competitive_pool(
                     local_query,
                     layer_tokens,
@@ -2951,6 +3104,8 @@ class ObservationLatentEncoder(nn.Module):
             condition_tokens = self._hierarchical_pool_project_tokens(
                 hidden_states,
                 hidden_token_type_ids=hidden_token_type_ids,
+                image_grid_thw=image_grid_thw,
+                spatial_merge_size=spatial_merge_size,
             )
             blockwise_condition_tokens = None
         else:
@@ -4696,6 +4851,7 @@ class VitaLatentActionGenerator(nn.Module):
         layer_local_queries_per_layer=2,
         layer_local_queries_per_layer_list=None,
         layer_local_token_source_modes=None,
+        hier_mq_separate_views=False,
         cross_layer_queries=18,
         global_queries=8,
         adaptive_local_mq=False,
@@ -4814,10 +4970,14 @@ class VitaLatentActionGenerator(nn.Module):
             )
         if (
             typed_flow_cross_attention or mq_token_value_gating
-        ) and not (hierarchical_query_pooling or layer_aligned_query_pooling):
+        ) and not (
+            hierarchical_query_pooling
+            or layer_aligned_query_pooling
+            or self.mq_type == "structured_mq54"
+        ):
             raise ValueError(
                 "Typed/token-gated Flow conditioning requires hierarchical_query_pooling "
-                "or layer_aligned_query_pooling=True."
+                "or layer_aligned_query_pooling=True, or structured_mq54."
             )
         condition_token_type_counts = None
         condition_token_source_counts = None
@@ -5026,6 +5186,7 @@ class VitaLatentActionGenerator(nn.Module):
             layer_local_queries_per_layer=layer_local_queries_per_layer,
             layer_local_queries_per_layer_list=layer_local_queries_per_layer_list,
             layer_local_token_source_modes=layer_local_token_source_modes,
+            hier_mq_separate_views=hier_mq_separate_views,
             cross_layer_queries=cross_layer_queries,
             global_queries=global_queries,
             adaptive_local_mq=adaptive_local_mq,

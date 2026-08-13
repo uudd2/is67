@@ -1324,6 +1324,7 @@ def train(config):
             vita_layer_local_queries_per_layer=config['model'].get('vita_layer_local_queries_per_layer', 2),
             vita_layer_local_queries_per_layer_list=config['model'].get('vita_layer_local_queries_per_layer_list', None),
             vita_layer_local_token_source_modes=config['model'].get('vita_layer_local_token_source_modes', None),
+            hier_mq_separate_views=config['model'].get('hier_mq_separate_views', False),
             vita_cross_layer_queries=config['model'].get('vita_cross_layer_queries', 18),
             vita_global_queries=config['model'].get('vita_global_queries', 8),
             vita_adaptive_local_mq=config['model'].get('vita_adaptive_local_mq', False),
