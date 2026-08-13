@@ -29,6 +29,8 @@ pretrained/
 runtime/
 runtime_*/
 *.egg-info/
+third_party/LIBERO-plus/
+third_party/VLABench/
 
 # Generated diagnostics and evaluation artifacts
 action_effect_teacher_comparison/
