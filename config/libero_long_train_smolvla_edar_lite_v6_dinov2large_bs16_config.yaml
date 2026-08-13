@@ -1,0 +1,95 @@
+project:
+  name: "VLANeXt_vita_hiermq54_smolvla_edar_lite_v6_dinov2large_bs16_libero_long"
+  output_dir: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints"
+  wandb_project: "VLANeXt_vita_hiermq54"
+  log_interval: 20
+  save_interval: 32000
+  use_wandb: true
+  wandb_core_metrics:
+    - "loss_latent_flow"
+    - "loss_action_recon"
+    - "loss_latent_consistency"
+    - "loss_flow_action_recon"
+
+data:
+  dataset_name: "libero"
+  data_root: "/media/dm/Elements/VLANeXt_migration/data/LIBERO_modified"
+  task_suite_name: "libero_10_no_noops"
+  full_sequence: true
+  history_len: 1
+  future_len: 8
+  buffer_size: 1000
+  batch_size: 16
+  max_steps: 160000
+  num_workers: 1
+  input_modality: "image"
+  view_mode: "multi"
+  normalization_mode: "min_max"
+  augmentation:
+    enabled: false
+
+model:
+  model_type: "smolvla_vita_latent"
+  lmm_path: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/pretrained/SmolVLM2-500M-Video-Instruct"
+  backbone_mode: "frozen"
+  action_dim: 7
+  vita_state_dim: 7
+  vita_action_horizon: 8
+  loss_type: "diffusion"
+  scheduler_type: "flow_match"
+  action_generation_mode: "smolvla_vita_latent"
+  num_inference_timesteps: 10
+
+  smolvla_load_vlm_weights: true
+  smolvla_freeze_vlm: true
+  smolvla_freeze_vision_encoder: true
+  smolvla_freeze_visual_connector: false
+  smolvla_num_vlm_layers: 16
+  smolvla_num_expert_layers: 16
+  smolvla_expert_width_multiplier: 0.75
+  smolvla_attention_mode: "cross_attn"
+  smolvla_self_attn_every_n_layers: 2
+
+  vita_action_representation_type: "single_view_edar_lite"
+  vita_edar_stage_a_checkpoint: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints/VLANeXt_v6_edar_lite_dinov2large_stage_a_libero_long/checkpoint_100000.pt"
+  vita_latent_dim: 1024
+  vita_hidden_dim: 1024
+  vita_action_ae_layers: 6
+  vita_dropout: 0.0
+  vita_enc_recon_weight: 0.0
+  vita_consistency_weight: 1.0
+  vita_flow_recon_weight: 0.2
+  vita_num_sampling_steps: 6
+  vita_rollout_gradient_checkpointing: false
+
+  vita_action_effect_enabled: true
+  vita_action_effect_visual_teacher: "dinov2"
+  vita_action_effect_visual_teacher_path: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/pretrained/dinov2-large"
+  vita_action_effect_main_view_only: true
+  vita_action_effect_visual_ae_weight: 0.0
+
+  use_proprio_input_vlm: true
+  use_action_input_policy: false
+  future_image_loss_weight: 0.0
+  dct_loss_weight: 0.0
+  gradient_checkpointing: false
+  action_vqvae: {enabled: false, frozen: true}
+
+train:
+  seed: 2026
+  resume_path: ""
+  pretrained_checkpoint: ""
+  learning_rate: 1.0e-4
+  vlm_lr_multiplier: 0.1
+  optimizer_betas: [0.9, 0.95]
+  optimizer_eps: 1.0e-8
+  weight_decay: 1.0e-10
+  lr_scheduler_type: "cosine_decay_with_warmup"
+  warmup_steps: 100
+  decay_steps: 30000
+  decay_learning_rate: 2.5e-6
+  gradient_accumulation_steps: 2
+  max_grad_norm: 10.0
+  device: "cuda"
+  distributed: false
+  dist_backend: "nccl"

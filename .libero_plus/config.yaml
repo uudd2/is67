@@ -1,0 +1,5 @@
+assets: /home/dm/QWENLA/VLANeXt_migration/VLANeXt/third_party/LIBERO-plus/libero/libero/assets
+bddl_files: /home/dm/QWENLA/VLANeXt_migration/VLANeXt/third_party/LIBERO-plus/libero/libero/bddl_files
+benchmark_root: /home/dm/QWENLA/VLANeXt_migration/VLANeXt/third_party/LIBERO-plus/libero/libero
+datasets: /home/dm/QWENLA/VLANeXt_migration/data/LIBERO_plus_datasets
+init_states: /home/dm/QWENLA/VLANeXt_migration/VLANeXt/third_party/LIBERO-plus/libero/libero/init_files

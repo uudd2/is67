@@ -1,0 +1,46 @@
+wandb
+__pycache__
+.DS_Store
+
+# Runtime outputs
+checkpoints/
+logs/
+eval_logs/
+wandb/
+runs/
+outputs/
+*.log
+*.pid
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Evaluation videos / media outputs
+*.mp4
+*.avi
+*.mov
+*.webm
+
+# Local pretrained weights and vendored environments
+pretrained/
+runtime/
+runtime_*/
+*.egg-info/
+
+# Generated diagnostics and evaluation artifacts
+action_effect_teacher_comparison/
+mq_gate_vis/
+rgb_channel_check/
+visual_pooling_diagnostic/
+edar_vis/
+edar_visualizations/
+calvin_*_ckpt*/
+robotwin_*_ckpt*/
+av_aloha_*_ckpt*/
+
+# Local archives and editor scratch files
+*.zip
+AAA*

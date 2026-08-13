@@ -1,0 +1,16 @@
+model:
+  diffusion_steps: 6
+  scheduler_type: "flow_match"
+
+eval:
+  finetuned_checkpoint: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints/VLANeXt_vita_hiermq54/robomimic_lift_can_square_main_wrist_vlm12_nohidden1_cross0_global24_bs16/checkpoint_128000.pt"
+  dataset_root: "/media/dm/Elements/VLANeXt_migration/data/RoboMimic_TFDS"
+  tasks: ["lift", "can", "square"]
+  num_trials_per_task: 50
+  max_steps: 500
+  num_steps_execute: 8
+  seed: 42
+  render_gpu_device_id: 0
+  save_video: true
+  save_video_every: 10
+  video_fps: 20

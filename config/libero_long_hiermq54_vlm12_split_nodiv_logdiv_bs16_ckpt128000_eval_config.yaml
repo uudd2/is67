@@ -1,0 +1,17 @@
+data:
+  augmentation: {center_crop: true, center_crop_ratio: 0.9}
+model:
+  diffusion_steps: 6
+  scheduler_type: "flow_match"
+eval:
+  finetuned_checkpoint: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints/VLANeXt_vita_hiermq54/vlm12_0vis8_0text4_1_4_8_12_dim1024_flow8_ae6_dct_nodiv_logdiv_fixedgate01_tokengate08_finetune_vlm01_bs16_libero_long/checkpoint_128000.pt"
+  task_suite_name: "libero_10"
+  num_steps_wait: 10
+  num_steps_execute: 8
+  num_trials_per_task: 50
+  seed: 42
+  image_size: 256
+  save_video: false
+  save_video_every: 1
+  resume_episodes: 0
+  resume_successes: 0

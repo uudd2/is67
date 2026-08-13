@@ -1,0 +1,60 @@
+project:
+  name: "EDAR_lite_dinov2large_av_aloha_all6_h16_stride3_stage_a"
+  output_dir: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints"
+  wandb_project: "VLANeXt_vita_hiermq54"
+  log_interval: 20
+  save_interval: 20000
+  use_wandb: true
+
+data:
+  dataset_name: "av_aloha"
+  data_root: "/media/dm/Elements/VLANeXt_migration/data/AV_ALOHA/converted/iantc104"
+  av_aloha_tasks:
+    - "av_aloha_sim_cube_transfer"
+    - "av_aloha_sim_thread_needle"
+    - "av_aloha_sim_peg_insertion"
+    - "av_aloha_sim_pour_test_tube"
+    - "av_aloha_sim_hook_package"
+    - "av_aloha_sim_slot_insertion"
+  main_camera: "observation.images.zed_cam_left"
+  action_normalization: "min_max"
+  state_normalization: "identity"
+  action_stride: 3
+  balance_tasks: true
+  buffer_size: 256
+  num_workers: 1
+  feature_cache: "/media/dm/Elements/VLANeXt_migration/data/edar_cache/av_aloha_all6_main_dinov2large_256_grid8"
+  preload_feature_cache: true
+
+model:
+  action_dim: 21
+  dino_model: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/pretrained/dinov2-large"
+  action_representation:
+    type: "single_view_edar_lite"
+    action_dim: 21
+    action_horizon: 16
+    future_offset: 48
+    latent_tokens: 4
+    latent_token_dim: 256
+    model_dim: 512
+    layers: 4
+    heads: 8
+    mlp_ratio: 4.0
+    visual_grid: 8
+    lambda_effect: 0.2
+
+train:
+  seed: 2026
+  device: "cuda"
+  precision: "bf16"
+  steps: 100000
+  batch_size: 16
+  per_device_batch_size: 16
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-5
+  warmup_steps: 1000
+  optimizer_betas: [0.9, 0.99]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  resume_path: ""

@@ -1,0 +1,229 @@
+1. 背景
+
+当前模型中，MQ tokens 同时承担两个作用：
+
+第一，MQ 经过 pooling 后生成 observation_latent，作为 Flow 的起点。
+
+第二，MQ tokens 作为条件输入，在每个 Flow block 中通过 cross-attention 注入到 action latent 中。
+
+原始形式为：
+
+Δx_l = CrossAttention(x_l, C, C)
+
+x_{l+1} = x_l + tanh(α) * Δx_l
+
+其中：
+
+x_l：第 l 层 Flow block 的 action latent
+C：MQ condition tokens
+α：cross-attention 分支的整体门控
+
+这个设计存在一个问题：所有 Flow 层共享或使用过于粗粒度的门控，无法区分不同层、不同 MQ token 的重要性。
+
+因此，引入 Layer-wise MQ Token Gate，让每一层 Flow block 都能单独判断每个 MQ token 的注入强度。
+
+2. 核心思想
+
+新的门控模块不直接用一个 MLP 从 C_i 生成 gate，而是分三步：
+
+1. 每个 MQ token 先经过 token MLP，得到门控特征
+2. 所有 token 特征经过 pooling 和 global MLP，得到全局门控上下文
+3. 每个 token 再结合全局上下文，生成自己的 gate
+
+这样做的目的很简单：
+
+先理解每个 token 自己是什么
+再理解所有 token 整体表示什么
+最后决定每个 token 在当前层该注入多少
+3. 模块输入
+
+对第 l 个 Flow block，输入为：
+
+x_l：当前 action latent
+C = [C_1, C_2, ..., C_N]：MQ condition tokens
+t_emb：Flow 时间步 embedding
+state_emb：机器人状态 embedding
+source_emb_i：第 i 个 condition token 的来源 embedding
+
+其中 C 可以包含：
+
+local MQ tokens
+cross-layer MQ tokens
+global MQ tokens
+state tokens
+4. Token-wise 门控特征提取
+
+首先，对每个 condition token 单独做 MLP 编码：
+
+h_{l,i} = φ_l([LN(C_i), source_emb_i])
+
+其中：
+
+φ_l：第 l 层的 token MLP
+LN：LayerNorm
+source_emb_i：表示 C_i 来自 local / global / layer / state 哪一类
+
+这一步的作用是：
+
+把每个原始 MQ token 转成适合做门控判断的特征 h_{l,i}
+5. 全局门控上下文聚合
+
+然后，对所有 token 的门控特征做 mean pooling：
+
+h_l^pool = MeanPool_i(h_{l,i})
+
+再结合时间步和机器人状态，生成全局门控上下文：
+
+z_l = ρ_l([h_l^pool, t_emb, state_emb])
+
+其中：
+
+ρ_l：第 l 层的 global MLP
+z_l：第 l 层的全局门控上下文
+
+这一步的作用是：
+
+让 gate 不只看单个 C_i，而是知道当前整体任务、Flow 阶段和机器人状态
+6. 生成每个 token 的 gate
+
+然后，每个 token 用自己的特征 h_{l,i} 和全局上下文 z_l 生成 gate：
+
+a_{l,i} = ψ_l([h_{l,i}, z_l])
+
+使用 residual gate：
+
+g_{l,i} = 1 + λ * tanh(a_{l,i})
+
+其中：
+
+ψ_l：第 l 层的 gate MLP
+λ：门控幅度系数，例如 0.1 或 0.5
+g_{l,i}：第 l 层中第 i 个 condition token 的门控值
+
+使用 residual gate 的原因是：
+
+训练初始时 g_{l,i} 接近 1
+不会一开始就把某些 MQ token 关掉
+训练更稳定
+7. 只对 Value 做门控
+
+在 cross-attention 中：
+
+Q_l = W_q^l x_l
+K_l = W_k^l C
+V_l = W_v^l C
+
+门控只作用在 V_l 上：
+
+V'_{l,i} = g_{l,i} * V_{l,i}
+
+然后计算 cross-attention：
+
+Δx_l = Attention(Q_l, K_l, V'_l)
+
+最后使用每层独立的 branch gate 注入：
+
+x_{l+1} = x_l + tanh(α_l) * Δx_l
+
+其中：
+
+α_l：第 l 层独立的 cross-attention 分支门控
+8. 完整公式
+
+完整过程如下：
+
+For Flow block l:
+
+1. Token feature:
+
+h_{l,i} = φ_l([LN(C_i), source_emb_i])
+
+2. Global context:
+
+h_l^pool = MeanPool_i(h_{l,i})
+
+z_l = ρ_l([h_l^pool, t_emb, state_emb])
+
+3. Token gate:
+
+a_{l,i} = ψ_l([h_{l,i}, z_l])
+
+g_{l,i} = 1 + λ * tanh(a_{l,i})
+
+4. Gated cross-attention:
+
+Q_l = W_q^l x_l
+K_l = W_k^l C
+V_l = W_v^l C
+
+V'_{l,i} = g_{l,i} * V_{l,i}
+
+Δx_l = Attention(Q_l, K_l, V'_l)
+
+5. Layer-wise injection:
+
+x_{l+1} = x_l + tanh(α_l) * Δx_l
+9. 和原始方法的区别
+
+原始方法：
+
+x_{l+1} = x_l + tanh(α) * CrossAttention(x_l, C, C)
+
+只有一个整体门控，控制整个 MQ cross-attention 分支。
+
+新方法：
+
+x_{l+1} = x_l + tanh(α_l) * Attention(Q_l, K_l, g_l * V_l)
+
+有两级门控：
+
+α_l：控制第 l 层整体是否使用 MQ 条件
+g_{l,i}：控制第 l 层中每个 MQ token 的注入强度
+
+也就是说：
+
+原始方法只回答：这一层要不要用 MQ？
+新方法回答：这一层要不要用 MQ，以及每个 MQ token 用多少？
+10. 设计优点
+10.1 每层独立控制
+
+不同 Flow block 可以学习不同的条件使用方式。
+
+浅层可以更依赖全局任务信息，中层可以更依赖局部视觉信息，深层可以更依赖机器人状态和动作修正信息。
+
+10.2 每个 token 独立控制
+
+不同 MQ token 的重要性不同。
+
+例如：
+
+目标物体 token 应该被增强
+背景 token 可以被减弱
+机器人状态 token 可以在接近目标时增强
+10.3 训练稳定
+
+使用：
+
+g_{l,i} = 1 + λ * tanh(a_{l,i})
+
+而不是：
+
+g_{l,i} = sigmoid(a_{l,i})
+
+可以避免训练初期把 token 直接压到 0。
+
+同时，令 α_l 初始化为 0，可以让 cross-attention 分支从较弱状态开始学习，避免破坏 Flow 主干。
+
+10.4 不破坏 attention 的匹配能力
+
+门控只作用在 V 上，不作用在 K 上。
+
+因此：
+
+K 保持不变，attention 仍然正常判断 x_l 应该看哪个 C_i
+V 被门控，控制最终从 C_i 注入多少信息
+
+也就是：
+
+attention 负责选择相关 token
+gate 负责控制注入强度

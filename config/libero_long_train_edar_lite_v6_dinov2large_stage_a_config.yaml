@@ -1,0 +1,48 @@
+project:
+  name: "VLANeXt_v6_edar_lite_dinov2large_stage_a_libero_long"
+  output_dir: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints"
+  wandb_project: "VLANeXt_vita_hiermq54"
+  log_interval: 20
+  save_interval: 20000
+  use_wandb: true
+
+data:
+  data_root: "/media/dm/Elements/VLANeXt_migration/data/LIBERO_modified"
+  task_suite_name: "libero_10_no_noops"
+  normalization_mode: "min_max"
+  buffer_size: 1000
+  num_workers: 1
+  feature_cache: "/media/dm/Elements/VLANeXt_migration/data/edar_cache/libero_10_dinov2large_256_grid8"
+  preload_feature_cache: true
+
+model:
+  dino_model: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/pretrained/dinov2-large"
+  action_representation:
+    type: "single_view_edar_lite"
+    main_view_key: "image"
+    action_horizon: 8
+    future_offset: 8
+    latent_tokens: 4
+    latent_token_dim: 256
+    model_dim: 512
+    layers: 4
+    heads: 8
+    mlp_ratio: 4.0
+    visual_grid: 8
+    lambda_effect: 0.2
+
+train:
+  seed: 2026
+  device: "cuda"
+  precision: "bf16"
+  steps: 100000
+  batch_size: 64
+  per_device_batch_size: 64
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-5
+  warmup_steps: 1000
+  optimizer_betas: [0.9, 0.99]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  resume_path: ""

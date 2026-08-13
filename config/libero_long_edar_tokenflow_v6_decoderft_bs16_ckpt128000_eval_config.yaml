@@ -1,0 +1,19 @@
+data:
+  augmentation: {center_crop: true, center_crop_ratio: 0.9}
+
+model:
+  diffusion_steps: 6
+  scheduler_type: "flow_match"
+
+eval:
+  finetuned_checkpoint: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints/VLANeXt_vita_hiermq54/edar_tokenflow_v6_dinov2large_stage_b_decoderft_bs16_libero_long/checkpoint_128000.pt"
+  task_suite_name: "libero_10"
+  num_steps_wait: 10
+  num_steps_execute: 8
+  num_trials_per_task: 50
+  seed: 42
+  image_size: 256
+  save_video: false
+  save_video_every: 1
+  resume_episodes: 0
+  resume_successes: 0
