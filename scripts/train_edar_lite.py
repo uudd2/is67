@@ -56,6 +56,9 @@ def _normalization_metadata(dataset, config):
             "stats": {name: value.tolist() for name, value in stats.items()},
         }
     metadata = {"mode": config["data"].get("normalization_mode", "min_max")}
+    if config["data"].get("task_suite_names"):
+        metadata["scope"] = "shared_union_of_suite_bounds"
+        metadata["task_suite_names"] = list(config["data"]["task_suite_names"])
     if metadata["mode"] == "min_max":
         metadata["action_min"] = dataset.action_min.tolist()
         metadata["action_max"] = dataset.action_max.tolist()
@@ -101,6 +104,9 @@ def _features_for_batch(batch, cache, extractor, device):
         return current.to(device), future.to(device)
     images = torch.cat([batch["image"], batch["future_image"]], dim=0).to(device)
     features = extractor(images)
+    # The frozen extractor uses inference_mode; trainable linear layers must
+    # receive ordinary tensors so they can save their inputs for backward.
+    features = features.clone()
     current, future = features.chunk(2, dim=0)
     return current, future
 
@@ -159,6 +165,10 @@ def main():
             state_normalization=data_config.get("state_normalization", "identity"),
             balance_tasks=bool(data_config.get("balance_tasks", True)),
         )
+    elif data_config.get("task_suite_names"):
+        from src.datasets.libero_mixed_stage_a import LiberoMixedStageA
+
+        dataset = LiberoMixedStageA(data_config, action_horizon)
     else:
         dataset = LiberoAct(
             data_path=os.path.join(
@@ -187,6 +197,9 @@ def main():
         num_workers=int(config["data"].get("num_workers", 1)),
         pin_memory=device.type == "cuda",
         persistent_workers=int(config["data"].get("num_workers", 1)) > 0,
+        **({"multiprocessing_context": data_config["multiprocessing_context"]}
+           if int(data_config.get("num_workers", 1)) > 0
+           and data_config.get("multiprocessing_context") else {}),
     )
     visual_dim = int(dino_metadata["hidden_size"])
     model = SingleViewEDARLite(
@@ -248,12 +261,17 @@ def main():
     if cache is not None and bool(config["data"].get("preload_feature_cache", False)):
         cache.preload()
     optimizer.zero_grad(set_to_none=True)
+    print(json.dumps({"event": "training_start", "start_step": start_step,
+                      "total_steps": total_steps, "output_dir": output_dir,
+                      "online_dino": cache is None,
+                      "action_normalization": normalization}), flush=True)
     progress = tqdm(range(start_step, total_steps), initial=start_step, total=total_steps, desc="EDAR Stage A")
     effect_weight = float(architecture.get("lambda_effect", 0.2))
     precision = str(config["train"].get("precision", "bf16"))
     autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     log_interval = int(config["project"].get("log_interval", 20))
     save_interval = int(config["project"].get("save_interval", 20000))
+    suite_counts = {}
 
     for step_index in progress:
         total_loss_sum = None
@@ -268,6 +286,8 @@ def main():
             actions = batch["future_actions"][:, :action_horizon].to(
                 device, non_blocking=True
             )
+            for suite in batch.get("suite_name", []):
+                suite_counts[suite] = suite_counts.get(suite, 0) + 1
             current_visual, future_visual = _features_for_batch(
                 batch,
                 cache,
@@ -301,6 +321,7 @@ def main():
         grad_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(),
             float(config["train"].get("max_grad_norm", 1.0)),
+            error_if_nonfinite=True,
         )
         optimizer.step()
         scheduler.step()
@@ -323,9 +344,11 @@ def main():
                     shuffled_latent,
                     current_visual,
                 )
-                target = torch.nn.functional.normalize(future_visual.float(), dim=-1)
-                shuffled = torch.nn.functional.normalize(shuffled_visual.float(), dim=-1)
-                shuffled_loss = (1.0 - (shuffled * target).sum(dim=-1)).mean()
+                shuffled_loss, _ = model.change_weighted_effect_loss(
+                    shuffled_visual,
+                    current_visual,
+                    future_visual,
+                )
                 shuffle_gap = shuffled_loss - last_metrics["loss_effect"]
                 latent = outputs["action_latent"].float()
                 log_values = {
@@ -342,6 +365,7 @@ def main():
                     "train/step": step,
                 }
             progress.set_postfix(loss=f"{total_loss_mean.item():.4f}")
+            print(json.dumps({**log_values, "suite_samples": suite_counts}), flush=True)
             if use_wandb:
                 wandb.log(log_values, step=step)
         if step % save_interval == 0:

@@ -393,18 +393,51 @@ class SingleViewEDARLite(nn.Module):
             "action_latent": action_latent,
             "decoded_actions": decoded_actions,
             "predicted_future_visual": predicted_future,
+            "current_visual_tokens": current_visual_tokens,
         }
+
+    @staticmethod
+    def change_weighted_effect_loss(
+        predicted_future_visual,
+        current_visual_tokens,
+        future_visual_tokens,
+    ):
+        prediction = F.normalize(predicted_future_visual.float(), dim=-1)
+        current = F.normalize(current_visual_tokens.detach().float(), dim=-1)
+        target = F.normalize(future_visual_tokens.detach().float(), dim=-1)
+
+        cosine = (prediction * target).sum(dim=-1)
+        loss_per_patch = 1.0 - cosine
+
+        with torch.no_grad():
+            patch_change = (1.0 - (current * target).sum(dim=-1)).clamp_min(0.0)
+            mean_change = patch_change.mean(dim=1, keepdim=True)
+            relative_change = torch.where(
+                mean_change > 1e-6,
+                patch_change / mean_change.clamp_min(1e-6),
+                torch.zeros_like(patch_change),
+            )
+            patch_weights = (1.0 + relative_change).clamp(max=3.0)
+            patch_weights = patch_weights / patch_weights.mean(
+                dim=1,
+                keepdim=True,
+            ).clamp_min(1e-6)
+
+        loss_effect = (patch_weights * loss_per_patch).mean()
+        return loss_effect, cosine.mean().detach()
 
     @staticmethod
     def representation_loss(outputs, actions, future_visual_tokens, effect_weight=0.2):
         loss_action = F.mse_loss(outputs["decoded_actions"].float(), actions.float())
-        target = F.normalize(future_visual_tokens.detach().float(), dim=-1)
-        prediction = F.normalize(outputs["predicted_future_visual"].float(), dim=-1)
-        loss_effect = (1.0 - (prediction * target).sum(dim=-1)).mean()
+        loss_effect, visual_cosine = SingleViewEDARLite.change_weighted_effect_loss(
+            outputs["predicted_future_visual"],
+            outputs["current_visual_tokens"],
+            future_visual_tokens,
+        )
         return loss_action + float(effect_weight) * loss_effect, {
             "loss_action": loss_action.detach(),
             "loss_effect": loss_effect.detach(),
-            "visual_cosine": (prediction * target).sum(dim=-1).mean().detach(),
+            "visual_cosine": visual_cosine,
         }
 
 

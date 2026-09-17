@@ -44,6 +44,45 @@ def test_edar_shapes_and_decoder_consistency():
     torch.testing.assert_close(full_actions, action_only, atol=1e-5, rtol=1e-4)
 
 
+def test_change_weighted_effect_matches_uniform_when_scene_is_static():
+    torch.manual_seed(17)
+    current = torch.nn.functional.normalize(torch.randn(2, 64, 8), dim=-1)
+    future = current.clone()
+    prediction = torch.nn.functional.normalize(torch.randn(2, 64, 8), dim=-1)
+
+    weighted, _ = SingleViewEDARLite.change_weighted_effect_loss(
+        prediction,
+        current,
+        future,
+    )
+    uniform = (1.0 - (prediction * future).sum(dim=-1)).mean()
+    torch.testing.assert_close(weighted, uniform)
+
+
+def test_change_weighted_effect_prioritizes_changed_patch():
+    current = torch.zeros(1, 64, 2)
+    current[..., 0] = 1.0
+    future = current.clone()
+    future[:, 0] = torch.tensor([0.0, 1.0])
+
+    wrong_changed_patch = future.clone()
+    wrong_changed_patch[:, 0] = torch.tensor([1.0, 0.0])
+    wrong_static_patch = future.clone()
+    wrong_static_patch[:, 1] = torch.tensor([0.0, 1.0])
+
+    changed_loss, _ = SingleViewEDARLite.change_weighted_effect_loss(
+        wrong_changed_patch,
+        current,
+        future,
+    )
+    static_loss, _ = SingleViewEDARLite.change_weighted_effect_loss(
+        wrong_static_patch,
+        current,
+        future,
+    )
+    assert changed_loss > static_loss
+
+
 def test_decode_actions_has_no_visual_leakage():
     model = _small_edar().eval()
     latent = torch.randn(2, 1024)
