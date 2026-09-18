@@ -3,6 +3,7 @@ import argparse
 import csv
 import gc
 import os
+import random
 from pathlib import Path
 
 import matplotlib
@@ -15,7 +16,7 @@ import torch.nn.functional as F
 
 from src.datasets.libero_act import LiberoAct
 from src.datasets.av_aloha_multitask_act import AVAlohaMultitaskAct
-from src.models.edar_lite import EDARFeatureCache, SingleViewEDARLite
+from src.models.edar_lite import EDARFeatureCache, FrozenDINOFeatureExtractor, SingleViewEDARLite
 
 
 def parse_args():
@@ -23,14 +24,20 @@ def parse_args():
         description="Visualize EDAR-lite future DINO feature predictions."
     )
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--output-dir", "--output_dir", default="outputs/stage_a_vis")
     parser.add_argument("--cache-dir", default="")
     parser.add_argument("--start-index", type=int, default=0)
-    parser.add_argument("--num-samples", type=int, default=4)
-    parser.add_argument("--stride", type=int, default=50)
+    parser.add_argument("--num-samples", "--num-vis", "--num_vis", type=int, default=20)
+    parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--task", default="", help="Optional AV-ALOHA task name.")
-    return parser.parse_args()
+    parser.add_argument("--suite", default="", help="Optional LIBERO suite from the checkpoint.")
+    parser.add_argument("--selection", choices=("sequential", "random"), default="sequential")
+    parser.add_argument("--seed", type=int, default=2026)
+    args = parser.parse_args()
+    if args.num_samples < 1 or args.stride < 1 or args.start_index < 0:
+        parser.error("num_vis/stride must be positive and start-index nonnegative")
+    return args
 
 
 def build_model(checkpoint, device):
@@ -53,19 +60,6 @@ def build_model(checkpoint, device):
     return model.to(device).eval(), config
 
 
-def shared_pca_maps(current, target, prediction, grid_size):
-    features = torch.cat([current, target, prediction], dim=0).float()
-    features = F.normalize(features, dim=-1)
-    centered = features - features.mean(dim=0, keepdim=True)
-    _, _, basis = torch.pca_lowrank(centered, q=3, center=False, niter=4)
-    colors = centered @ basis
-    low = torch.quantile(colors, 0.02, dim=0)
-    high = torch.quantile(colors, 0.98, dim=0)
-    colors = ((colors - low) / (high - low).clamp_min(1e-6)).clamp(0, 1)
-    maps = colors.reshape(3, grid_size, grid_size, 3).cpu().numpy()
-    return maps[0], maps[1], maps[2]
-
-
 def add_token_grid(axis, grid_size):
     axis.set_xticks(np.arange(-0.5, grid_size, 1), minor=True)
     axis.set_yticks(np.arange(-0.5, grid_size, 1), minor=True)
@@ -74,7 +68,14 @@ def add_token_grid(axis, grid_size):
 
 
 def show_rgb(axis, image, title):
+    if image is None:
+        axis.text(0.5, 0.5, "RGB unavailable", ha="center", va="center")
+        axis.set_title(title)
+        axis.axis("off")
+        return
     image = np.asarray(image)
+    if image.ndim == 3 and image.shape[0] == 3 and image.shape[-1] != 3:
+        image = image.transpose(1, 2, 0)
     if image.dtype != np.uint8:
         image = np.clip(image, 0.0, 1.0)
     axis.imshow(image)
@@ -94,13 +95,16 @@ def show_grid(axis, values, title, cmap=None, value_range=None):
     return image
 
 
-def visualize_sample(model, cache, sample, sample_index, output_dir, device):
+@torch.inference_mode()
+def evaluate_sample(model, cache, extractor, sample, sample_index, device):
     actions = sample["future_actions"][: model.encoder.action_horizon].unsqueeze(0).to(device).float()
-    current = cache.get(sample["frame_id"]).unsqueeze(0).to(device).float()
-    target = cache.get(sample["future_frame_id"]).unsqueeze(0).to(device).float()
-
-    with torch.inference_mode():
-        outputs = model(actions, current)
+    if cache is not None:
+        current = cache.get(sample["frame_id"]).unsqueeze(0).to(device).float()
+        target = cache.get(sample["future_frame_id"]).unsqueeze(0).to(device).float()
+    else:
+        images = torch.stack([torch.as_tensor(sample["image"]), torch.as_tensor(sample["future_image"])])
+        current, target = extractor(images.to(device)).float().chunk(2)
+    outputs = model(actions, current)
     prediction = outputs["predicted_future_visual"].float()
     decoded_actions = outputs["decoded_actions"].float()
 
@@ -109,92 +113,100 @@ def visualize_sample(model, cache, sample, sample_index, output_dir, device):
     prediction_norm = F.normalize(prediction, dim=-1)
     patch_cosine = (prediction_norm * target_norm).sum(dim=-1)[0]
     copy_cosine = (current_norm * target_norm).sum(dim=-1)[0]
-    error_map = (1.0 - patch_cosine).clamp_min(0.0)
-    motion_map = (1.0 - copy_cosine).clamp_min(0.0)
+    error_map = 1.0 - patch_cosine
+    motion_map = 1.0 - copy_cosine
+    predicted_motion = 1.0 - (current_norm * prediction_norm).sum(dim=-1)[0]
     grid_size = int(round(current.shape[1] ** 0.5))
-    current_pca, target_pca, prediction_pca = shared_pca_maps(
-        current[0], target[0], prediction[0], grid_size
-    )
+    if grid_size != 8 or current.shape[1] != 64:
+        raise ValueError("Quick evaluation expects the existing 8x8 patch grid.")
 
     pred_cosine = patch_cosine.mean().item()
     baseline_cosine = copy_cosine.mean().item()
     action_mse = F.mse_loss(decoded_actions, actions).item()
-    feature_mse = F.mse_loss(prediction_norm, target_norm).item()
-    improved_fraction = (patch_cosine > copy_cosine).float().mean().item()
     metrics = {
         "sample_index": sample_index,
         "frame_id": sample["frame_id"],
         "future_frame_id": sample["future_frame_id"],
-        "prediction_cosine": pred_cosine,
-        "copy_baseline_cosine": baseline_cosine,
+        "pred_cosine": pred_cosine,
+        "copy_cosine": baseline_cosine,
         "cosine_gain": pred_cosine - baseline_cosine,
-        "improved_patch_fraction": improved_fraction,
-        "feature_mse": feature_mse,
         "action_mse": action_mse,
+        "copy_error": motion_map.mean().item(),
+        "shuffle_gap": float("nan"),
     }
+    return {"metrics": metrics, "sample": sample, "actions": actions.cpu(),
+            "decoded": decoded_actions.cpu(), "current": current.cpu(), "target": target.cpu(),
+            "prediction": prediction.cpu(), "latent": outputs["action_latent"].cpu(),
+            "gt_effect": motion_map.reshape(8, 8).cpu().numpy(),
+            "pred_effect": predicted_motion.reshape(8, 8).cpu().numpy(),
+            "error": error_map.reshape(8, 8).cpu().numpy()}
 
-    figure, axes = plt.subplots(2, 4, figsize=(16, 8), constrained_layout=True)
-    show_rgb(axes[0, 0], sample["image"], "Current RGB (t)")
-    show_rgb(
-        axes[0, 1],
-        sample["future_image"],
-        f"Future RGB (horizon={model.encoder.action_horizon})",
-    )
-    show_grid(axes[0, 2], current_pca, "Current DINO PCA")
-    show_grid(axes[0, 3], target_pca, "True future DINO PCA")
-    show_grid(axes[1, 0], prediction_pca, "EDAR predicted DINO PCA")
-    motion_image = show_grid(
-        axes[1, 1],
-        motion_map.reshape(grid_size, grid_size).cpu().numpy(),
-        "True feature motion (1-cos)",
-        cmap="magma",
-        value_range=(0.0, max(float(motion_map.max().item()), 1e-6)),
-    )
-    error_image = show_grid(
-        axes[1, 2],
-        error_map.reshape(grid_size, grid_size).cpu().numpy(),
-        "Prediction error (1-cos)",
-        cmap="inferno",
-        value_range=(0.0, max(float(error_map.max().item()), 1e-6)),
-    )
-    figure.colorbar(motion_image, ax=axes[1, 1], fraction=0.046)
-    figure.colorbar(error_image, ax=axes[1, 2], fraction=0.046)
 
-    action_axis = axes[1, 3]
-    true_actions = actions[0].cpu().numpy()
-    predicted_actions = decoded_actions[0].cpu().numpy()
+@torch.inference_mode()
+def add_shuffle_metrics(model, records, device):
+    if len(records) < 2:
+        return  # A single sample cannot provide a non-identity batch shuffle.
+    latents = torch.cat([record["latent"] for record in records]).to(device).roll(1, dims=0)
+    for index, record in enumerate(records):
+        current, target = record["current"].to(device), record["target"].to(device)
+        _, shuffled = model.decoder(latents[index:index+1], current)
+        shuffled_loss, _ = model.change_weighted_effect_loss(shuffled, current, target)
+        correct_loss, _ = model.change_weighted_effect_loss(record["prediction"].to(device), current, target)
+        record["metrics"]["shuffle_gap"] = (shuffled_loss - correct_loss).item()
+
+
+def visualize_sample(record, number, output_dir):
+    metrics, sample = record["metrics"], record["sample"]
+    figure = plt.figure(figsize=(14, 8), constrained_layout=True)
+    layout = figure.add_gridspec(2, 3)
+    show_rgb(figure.add_subplot(layout[0, 0]), sample.get("image"), "Current RGB (t)")
+    show_rgb(figure.add_subplot(layout[0, 1]), sample.get("future_image"), "Future RGB (t+horizon)")
+    action_layout = layout[0, 2].subgridspec(2, 1, height_ratios=[2, 1])
+    action_axis = figure.add_subplot(action_layout[0])
+    gripper_axis = figure.add_subplot(action_layout[1])
+    true_actions = record["actions"][0].numpy()
+    predicted_actions = record["decoded"][0].numpy()
+    grippers = [6] if true_actions.shape[-1] == 7 else ([6, 13] if true_actions.shape[-1] == 14 else [])
     for dimension in range(true_actions.shape[-1]):
-        action_axis.plot(
-            true_actions[:, dimension],
-            linewidth=1.3,
-            label=f"gt a{dimension}" if dimension < 2 else None,
-        )
-        action_axis.plot(
-            predicted_actions[:, dimension],
-            linestyle="--",
-            linewidth=1.0,
-            alpha=0.8,
-            label=f"pred a{dimension}" if dimension < 2 else None,
-        )
-    action_axis.set_title(f"Action reconstruction (MSE={action_mse:.4f})", fontsize=10)
-    action_axis.set_xlabel("Chunk step")
-    action_axis.grid(alpha=0.25)
-    action_axis.legend(fontsize=7, ncol=2)
-
+        axis = gripper_axis if dimension in grippers else action_axis
+        color = plt.get_cmap("tab20")(dimension % 20)
+        axis.plot(true_actions[:, dimension], color=color, lw=1.4, label=f"a{dimension}")
+        axis.plot(predicted_actions[:, dimension], color=color, ls="--", lw=1.2)
+    action_axis.set_title("Action curves: GT solid / Pred dashed", fontsize=10)
+    gripper_axis.set_title("Gripper" if grippers else "No gripper dimension specified", fontsize=9)
+    for axis in (action_axis, gripper_axis):
+        axis.set_xticks(range(true_actions.shape[0]))
+        axis.set_ylabel("Normalized")
+        axis.grid(alpha=0.25)
+        if axis.lines:
+            axis.legend(fontsize=7, ncol=3)
+    gripper_axis.set_xlabel("Step")
+    shared_max = max(float(record["gt_effect"].max()), float(record["pred_effect"].max()), 1e-6)
+    for column, key, title in ((0, "gt_effect", "GT Effect Map (1 - cos)"),
+                               (1, "pred_effect", "Pred Effect Map (1 - cos)"),
+                               (2, "error", "Feature Error (1 - cos)")):
+        axis = figure.add_subplot(layout[1, column])
+        vmax = shared_max if key != "error" else max(float(record[key].max()), 1e-6)
+        heatmap = show_grid(axis, record[key], title, cmap="magma" if key != "error" else "inferno", value_range=(0, vmax))
+        figure.colorbar(heatmap, ax=axis, fraction=0.046)
+    gap = metrics["shuffle_gap"]
+    gap_text = f"{gap:+.4f}" if np.isfinite(gap) else "N/A (one sample)"
     figure.suptitle(
-        f"sample={sample_index} | pred cos={pred_cosine:.4f} | "
-        f"copy cos={baseline_cosine:.4f} | gain={pred_cosine - baseline_cosine:+.4f} | "
-        f"better patches={improved_fraction:.1%}",
-        fontsize=12,
+        f"Sample {number:03d} | Dataset index {metrics['sample_index']}\n"
+        f"Action MSE: {metrics['action_mse']:.4f} | Pred Cos: {metrics['pred_cosine']:.4f} | "
+        f"Copy Cos: {metrics['copy_cosine']:.4f} | Cos Gain: {metrics['cosine_gain']:+.4f} | Shuffle Gap: {gap_text}",
+        fontsize=11,
     )
-    destination = output_dir / f"sample_{sample_index:06d}.png"
+    destination = output_dir / f"sample_{number:03d}.png"
     figure.savefig(destination, dpi=160)
     plt.close(figure)
-    return metrics
 
 
 def main():
     args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable.")
@@ -206,9 +218,20 @@ def main():
     if checkpoint.get("schema") != "single_view_edar_lite_stage_a_v1":
         raise ValueError("Checkpoint is not an EDAR-lite Stage A checkpoint.")
     model, config = build_model(checkpoint, device)
-    cache_dir = args.cache_dir or config["data"]["feature_cache"]
-    cache_metadata = EDARFeatureCache.read_metadata(cache_dir)
-    cache = EDARFeatureCache(cache_dir, cache_metadata)
+    normalization = checkpoint.get("action_normalization", {})
+    expected_metadata = checkpoint["dino_metadata"]
+    cache_dir = args.cache_dir or config["data"].get("feature_cache", "")
+    cache, extractor = None, None
+    if cache_dir:
+        cache_metadata = EDARFeatureCache.read_metadata(cache_dir)
+        for key in ("hidden_size", "image_size", "output_grid", "patch_size", "image_mean", "image_std"):
+            if cache_metadata.get(key) != expected_metadata.get(key):
+                raise ValueError(f"Cache/checkpoint DINO metadata mismatch: {key}")
+        if os.path.realpath(cache_metadata["backbone"]) != os.path.realpath(expected_metadata["backbone"]):
+            raise ValueError("Cache/checkpoint DINO backbone mismatch")
+        cache = EDARFeatureCache(cache_dir, cache_metadata)
+    else:
+        extractor = FrozenDINOFeatureExtractor(config["model"]["dino_model"]).to(device).eval()
     del checkpoint
     gc.collect()
 
@@ -244,62 +267,84 @@ def main():
                 info for info in dataset.task_info if info["name"] == args.task
             ]
     else:
-        dataset = LiberoAct(
-            data_path=os.path.join(
-                os.path.expanduser(data_config["data_root"]),
-                data_config["task_suite_name"],
-                "1.0.0",
-            ),
-            dataset_name=data_config["task_suite_name"],
-            history_len=1,
-            future_len=horizon,
-            full_sequence=True,
-            input_modality="image",
-            view_mode="single",
-            load_future_image=True,
-            future_image_mode="horizon",
-            strict_future_horizon=True,
-            frame_ids_only=False,
-            buffer_size=1,
-            normalization_mode=data_config.get("normalization_mode", "min_max"),
-            normalization_stats_path=data_config.get("normalization_stats_path"),
-        )
+        suites = data_config.get("task_suite_names") or [data_config["task_suite_name"]]
+        if args.suite:
+            if args.suite not in suites:
+                raise ValueError(f"Suite not present in checkpoint: {args.suite}")
+            suites = [args.suite]
+        datasets = []
+        for suite in suites:
+            child = LiberoAct(
+                data_path=os.path.join(os.path.expanduser(data_config["data_root"]), suite, "1.0.0"),
+                dataset_name=suite, history_len=1, future_len=horizon,
+                full_sequence=True, input_modality="image", view_mode="single",
+                load_future_image=True, future_image_mode="horizon",
+                strict_future_horizon=True, frame_ids_only=False, buffer_size=1,
+                normalization_mode=data_config.get("normalization_mode", "min_max"),
+                normalization_stats_path=data_config.get("normalization_stats_path"),
+            )
+            if normalization.get("mode") == "min_max":
+                child.action_min = np.asarray(normalization["action_min"])
+                child.action_max = np.asarray(normalization["action_max"])
+            datasets.append(child)
+
+        def samples():
+            # Reuse existing datasets; rotate suites without changing their internals.
+            streams = [(suite, iter(child)) for suite, child in zip(suites, datasets)]
+            while streams:
+                active = []
+                for suite, stream in streams:
+                    try:
+                        sample = dict(next(stream))
+                    except StopIteration:
+                        continue
+                    if data_config.get("task_suite_names"):
+                        for key in ("frame_id", "future_frame_id"):
+                            sample[key] = f"{suite}/{sample[key]}"
+                    yield sample
+                    active.append((suite, stream))
+                streams = active
+        dataset = samples()
 
     requested = {
         args.start_index + offset * args.stride
         for offset in range(args.num_samples)
     }
-    rows = []
+    if args.selection == "random":
+        requested = set(random.Random(args.seed).sample(
+            range(args.start_index, args.start_index + args.num_samples * args.stride),
+            args.num_samples,
+        ))
+    records = []
     for index, sample in enumerate(dataset):
         if index not in requested:
             continue
-        rows.append(
-            visualize_sample(model, cache, sample, index, output_dir, device)
+        records.append(
+            evaluate_sample(model, cache, extractor, sample, index, device)
         )
-        print(f"Saved sample {index} ({len(rows)}/{len(requested)})")
-        if len(rows) == len(requested):
+        print(f"Evaluated sample {index} ({len(records)}/{len(requested)})", flush=True)
+        if len(records) == len(requested):
             break
-    if len(rows) != len(requested):
+    if len(records) != len(requested):
         raise RuntimeError(
-            f"Dataset ended after producing {len(rows)}/{len(requested)} requested samples."
+            f"Dataset ended after producing {len(records)}/{len(requested)} requested samples."
         )
+    add_shuffle_metrics(model, records, device)
+    for number, record in enumerate(records):
+        visualize_sample(record, number, output_dir)
+    rows = [record["metrics"] for record in records]
 
     summary_path = output_dir / "summary.tsv"
     with summary_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
-    numeric_keys = [
-        "prediction_cosine",
-        "copy_baseline_cosine",
-        "cosine_gain",
-        "improved_patch_fraction",
-        "feature_mse",
-        "action_mse",
-    ]
     print(f"Saved visualization to {output_dir}")
-    for key in numeric_keys:
+    print("========== Stage-A Quick Evaluation ==========")
+    print(f"samples        : {len(rows)}")
+    for key in ("action_mse", "pred_cosine", "copy_cosine", "cosine_gain", "shuffle_gap", "copy_error"):
         print(f"{key}: {np.mean([float(row[key]) for row in rows]):.6f}")
+    print("==============================================")
 
 
 if __name__ == "__main__":

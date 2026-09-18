@@ -8,6 +8,17 @@ from src.datasets.libero_mixed_stage_a import LiberoMixedStageA
 from scripts.train_edar_lite import _features_for_batch
 
 
+def test_cache_mode_disables_rgb_and_keeps_frame_ids():
+    with patch('src.datasets.libero_mixed_stage_a.LiberoAct') as factory, patch('os.path.isdir', return_value=True), patch('os.path.isfile', return_value=True):
+        factory.return_value.action_min = np.full(6, -1.0)
+        factory.return_value.action_max = np.full(6, 1.0)
+        LiberoMixedStageA({'task_suite_names': ['spatial', 'goal'], 'data_root': '/unused', 'feature_cache': '/cache'})
+        for call in factory.call_args_list:
+            assert call.kwargs['frame_ids_only'] is True
+            assert call.kwargs['load_future_image'] is False
+            assert call.kwargs['strict_future_horizon'] is True
+
+
 class FakeSuite:
     def __init__(self, dataset_name, **kwargs):
         assert kwargs['strict_future_horizon']

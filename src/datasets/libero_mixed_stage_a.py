@@ -1,4 +1,4 @@
-"""Balanced online Stage-A mixture with one action normalization space."""
+"""Balanced Stage-A mixture with one action normalization space."""
 import os
 import random
 
@@ -15,8 +15,9 @@ class LiberoMixedStageA(IterableDataset):
         self.suites = tuple(data_config['task_suite_names'])
         if len(self.suites) < 2 or len(set(self.suites)) != len(self.suites):
             raise ValueError('Expected at least two distinct LIBERO suites.')
-        if data_config.get('feature_cache'):
-            raise ValueError('Mixed Stage-A uses online DINO, not a feature cache.')
+        cached = bool(data_config.get('feature_cache'))
+        if cached and not os.path.isfile(os.path.join(os.path.expanduser(data_config['feature_cache']), 'metadata.json')):
+            raise FileNotFoundError('Configured feature cache is missing metadata.json')
         if data_config.get('normalization_mode', 'min_max') != 'min_max':
             raise ValueError('Mixed Stage-A requires shared min/max normalization.')
         self.datasets = []
@@ -28,8 +29,8 @@ class LiberoMixedStageA(IterableDataset):
                 data_path=path, dataset_name=suite, history_len=1,
                 future_len=action_horizon, full_sequence=True,
                 input_modality='image', view_mode='single',
-                load_future_image=True, future_image_mode='horizon',
-                strict_future_horizon=True, frame_ids_only=False,
+                load_future_image=not cached, future_image_mode='horizon',
+                strict_future_horizon=True, frame_ids_only=cached,
                 buffer_size=int(data_config.get('buffer_size', 256)),
                 normalization_mode='min_max',
             ))
