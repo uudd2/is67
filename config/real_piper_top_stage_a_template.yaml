@@ -1,0 +1,68 @@
+# Real Piper Stage-A template. Fill the verified LeRobot repo_id and top-camera key
+# on the data host before running. This file intentionally does not guess them.
+project:
+  name: "EDAR_lite_real_piper_top_stage_a"
+  output_dir: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/checkpoints"
+  wandb_project: "VLANeXt_vita_hiermq54"
+  log_interval: 20
+  val_interval: 1000
+  save_interval: 5000
+  use_wandb: true
+
+data:
+  dataset_name: "lerobot_piper_real"
+  batches:
+    - name: "fold_clothes_20260918_131512"
+      path: "/home/dm/.cache/huggingface/lerobot/local/fold_clothes_20260918_131512"
+      repo_id: "REPLACE_WITH_VERIFIED_REPO_ID"
+    - name: "fold_clothes_20260918_213821"
+      path: "/home/dm/.cache/huggingface/lerobot/local/fold_clothes_20260918_213821"
+      repo_id: "REPLACE_WITH_VERIFIED_REPO_ID"
+    - name: "pick_20260919_161241"
+      path: "/home/dm/.cache/huggingface/lerobot/local/pick_20260919_161241"
+      repo_id: "REPLACE_WITH_VERIFIED_REPO_ID"
+    - name: "pick_20260919_163008"
+      path: "/home/dm/.cache/huggingface/lerobot/local/pick_20260919_163008"
+      repo_id: "REPLACE_WITH_VERIFIED_REPO_ID"
+  main_camera: "REPLACE_WITH_VERIFIED_TOP_CAMERA_KEY"
+  video_backend: "pyav"
+  val_ratio: 0.1
+  split_seed: 2026
+  action_stride: 1
+  # Provisional until the 14 action dimensions are inspected on the data host.
+  action_normalization: "mean_std"
+  buffer_size: 256
+  num_workers: 1
+  max_val_batches: 100
+
+model:
+  dino_model: "/home/dm/QWENLA/VLANeXt_migration/VLANeXt/pretrained/dinov2-large"
+  action_representation:
+    type: "single_view_edar_lite"
+    action_dim: 14
+    action_horizon: 8
+    latent_tokens: 4
+    latent_token_dim: 256
+    model_dim: 512
+    layers: 4
+    heads: 8
+    mlp_ratio: 4.0
+    visual_grid: 8
+    lambda_effect: 0.2
+
+train:
+  seed: 2026
+  device: "cuda"
+  precision: "bf16"
+  # Safe smoke-test default; choose the formal training budget after data inspection.
+  steps: 1000
+  batch_size: 16
+  per_device_batch_size: 16
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-5
+  warmup_steps: 100
+  optimizer_betas: [0.9, 0.99]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  resume_path: ""
