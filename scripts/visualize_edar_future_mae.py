@@ -88,10 +88,10 @@ def main():
             save_panel(current, future, outputs['pred_future_rgb'], values, destination)
             rows.append(values)
             print(f'Saved {destination} | {batch["frame_id"][0]}', flush=True)
-            if len(rows) == args.num_vis:
+            if len(rows) >= args.num_vis:
                 break
     summary = {name: float(np.mean([row[name] for row in rows])) for name in rows[0]}
-    print(json.dumps({'samples': len(rows), **summary}, indent=2))
+    print(json.dumps({'samples': len(rows), **summary}, indent=2), flush=True)
 
 
 if __name__ == '__main__':
